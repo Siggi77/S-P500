@@ -11,7 +11,6 @@ RESET_LOGS = False
 APP_FILENAME = "app.py"
 APP_PORT = 8501
 NGROK_TOKEN = "2xB84xP48MVVpa7WOjuVT9OgiUI_2pDz4T89jbtkBdgvrLtV4"
-LOG_FILES = ["spy_forecast_log.csv", "spy_intraday_history.csv"]
 
 # Cleanup
 !pkill -f streamlit || true
@@ -23,7 +22,12 @@ LOG_FILES = ["spy_forecast_log.csv", "spy_intraday_history.csv"]
 !rm -rf /root/.ngrok2 /root/.config/ngrok
 !streamlit cache clear
 
-# Backup oder Log-Reset
+# Jeden Tag ein neues Logfile für Forecast-Log
+today_str = datetime.datetime.now().strftime("%Y-%m-%d")
+forecast_log_file = f"spy_forecast_log_{today_str}.csv"
+LOG_FILES = [forecast_log_file, "spy_intraday_history.csv"]
+
+# Backup/Reset nur, wenn das File heute noch nicht existiert
 for file in LOG_FILES:
     if os.path.exists(file):
         if RESET_LOGS:
@@ -46,11 +50,14 @@ from streamlit_autorefresh import st_autorefresh
 from nltk.sentiment.vader import SentimentIntensityAnalyzer
 from plotly.subplots import make_subplots
 import nltk
+from datetime import datetime
 
 nltk.download('vader_lexicon', quiet=True)
 
 # ========================== KONSTANTEN & INTERVAL OPTIONS ==========================
-LOG_FILES = ["spy_forecast_log.csv", "spy_intraday_history.csv"]
+today_str = datetime.now().strftime("%Y-%m-%d")
+forecast_log_file = f"spy_forecast_log_{today_str}.csv"
+LOG_FILES = [forecast_log_file, "spy_intraday_history.csv"]
 MODEL_FILE = "forecast_model_5min.pkl"
 REPAIRED_LOG_FILE = "spy_forecast_log_repaired.csv"
 FINNHUB_API_KEY = "d0ldkdhr01qhb027s8fgd0ldkdhr01qhb027s8g0"
