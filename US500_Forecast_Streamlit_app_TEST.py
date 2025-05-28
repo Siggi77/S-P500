@@ -60,11 +60,23 @@ from datetime import datetime
 from sklearn.metrics import mean_absolute_error
 
 def train_and_evaluate_regression(train, test, feature_cols, target_col="target"):
+    # Entferne Zeilen mit NaN
+    train = train.dropna(subset=feature_cols + [target_col])
+    test = test.dropna(subset=feature_cols + [target_col])
+    if len(train) == 0 or len(test) == 0:
+        # Optional: print("Nicht genug Daten für Training/Test")
+        return None, None, None, None, None, None, None
     X_train, y_train = train[feature_cols], train[target_col]
     X_test, y_test = test[feature_cols], test[target_col]
     model = RandomForestRegressor(n_estimators=100, random_state=42)
     model.fit(X_train, y_train)
     preds = model.predict(X_test)
+    # Nochmals auf NaN checken (optional)
+    mask = ~np.isnan(preds)
+    preds = preds[mask]
+    y_test = y_test.iloc[mask]
+    if len(preds) == 0:
+        return model, preds, None, None, None, None, None
     mae = mean_absolute_error(y_test, preds)
     hitrate = np.mean(np.sign(y_test) == np.sign(preds))
     avg_pred = np.mean(preds)
@@ -380,6 +392,8 @@ def robust_live_logging(
     finnhub_data=None,
     volatility_window=10
 ):
+    import os
+    import pandas as pd
     import joblib
     import numpy as np
 
@@ -1027,16 +1041,14 @@ model_dict = {}  # <-- HIER initialisieren
 realtime_preds = []  # Für alle Intervalle jeweils die aktuelle (letzte) Prognose
 
 for label, delta in interval_options:
-    # Zielwerte für das aktuelle Intervall berechnen
     df_target = add_target_return_for_timedelta_with_handelsende(df, delta)
-
-    # Modelltraining (nur wenn genügend Daten)
     if not df_target.empty and df_target["target"].notna().sum() > 50:
+        feature_cols = [col for col in df_target.columns if col not in ["Time", "Price", "target"]]
         train, test = time_series_train_test_split(df_target)
         model, preds, mae, hitrate, avg_pred, avg_true, std_pred = train_and_evaluate_regression(
             train, test, feature_cols, target_col="target"
         )
-        model_dict[label] = model  # <-- HIER ins Dictionary speichern
+        model_dict[label] = model
 
     # Statistik für das Intervall
     valid = (~df_target["target"].isna()) & (~df_target["ML_Prognose"].isna())
