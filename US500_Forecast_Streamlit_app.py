@@ -6,6 +6,9 @@
 import os, shutil, datetime, time, socket, subprocess
 from pyngrok import conf, ngrok
 from nltk.sentiment.vader import SentimentIntensityAnalyzer
+from datetime import datetime
+import glob
+today_str = datetime.now().strftime("%Y-%m-%d")
 
 RESET_LOGS = False
 APP_FILENAME = "app.py"
@@ -23,7 +26,7 @@ NGROK_TOKEN = "2xB84xP48MVVpa7WOjuVT9OgiUI_2pDz4T89jbtkBdgvrLtV4"
 !streamlit cache clear
 
 # Jeden Tag ein neues Logfile für Forecast-Log
-today_str = datetime.datetime.now().strftime("%Y-%m-%d")
+today_str = datetime.now().strftime("%Y-%m-%d")
 forecast_log_file = f"spy_forecast_log_{today_str}.csv"
 LOG_FILES = [forecast_log_file, "spy_intraday_history.csv"]
 
@@ -33,8 +36,11 @@ for file in LOG_FILES:
         if RESET_LOGS:
             os.remove(file)
         else:
-            ts = datetime.datetime.now().strftime("%Y%m%d_%H%M")
-            shutil.copy(file, f"{file.replace('.csv','')}_backup_{ts}.csv")
+            today = datetime.now().strftime("%Y%m%d")
+            backup_pattern = f"{file.replace('.csv','')}_backup_{today}_*.csv"
+            if not glob.glob(backup_pattern):
+                ts = datetime.now().strftime("%Y%m%d_%H%M")
+                shutil.copy(file, f"{file.replace('.csv','')}_backup_{ts}.csv")
 
 app_code = '''\
 import streamlit as st
@@ -90,8 +96,11 @@ for file in LOG_FILES:
         if RESET_LOGS:
             os.remove(file)
         else:
-            ts = datetime.datetime.now().strftime("%Y%m%d_%H%M")
-            shutil.copy(file, f"{file.replace('.csv','')}_backup_{ts}.csv")
+            today = datetime.now().strftime("%Y%m%d")
+            backup_pattern = f"{file.replace('.csv','')}_backup_{today}_*.csv"
+            if not glob.glob(backup_pattern):
+                ts = datetime.now().strftime("%Y%m%d_%H%M")
+                shutil.copy(file, f"{file.replace('.csv','')}_backup_{ts}.csv")
 
 # ========================== ML: Dummy-Modell & Auto-Training ==========================
 def create_dummy_model():
