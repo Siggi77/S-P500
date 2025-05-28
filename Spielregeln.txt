@@ -1,0 +1,11 @@
+Immer auf dem aktuellen Stand aufbauen
+Nichtts entfernen, ausser der Ersatz ist nötig
+Alle Funktionalitäten beibehlaten, vollständiger Code berücksichtigen
+Keine experimentellen Änderungen
+Jeweils den GESAMMTEN Code auf Logik, Abhängigkeiten, X-Referenzen, File-Logik, Semantik, Robustheit, Ausführbarkeit, Fehlerquellen und Fehlercodes, etc. prüfen
+Immer mit live Daten arbeiten, keine Simulationen oder Dummy-Files
+Immer den gesamten App-Prozess und Logik prüfen (wie z.B. wird beim Schrieben auch effektiv und korrekt geschrieben)
+Immer auf Kohärenz mit der CSV Umgebung prüfen
+Immer die bisherige Konversation einbeziehen und gelerntes, respektive erarbeitetes beibehalten und integrieren
+Immer eine vollständige, Funktional und X-Refernzierte ML-Logik prüfen (für alle Inputs und Ausgaben)
+Zeitintervall-Logik beibehalten
