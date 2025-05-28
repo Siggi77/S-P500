@@ -92,6 +92,53 @@ def time_series_train_test_split(df, test_size=0.2):
 
 nltk.download('vader_lexicon', quiet=True)
 
+def build_features(
+    df,
+    selected_features=None,
+    sentiment_score=None,
+    finnhub_data=None,
+    volatility_window=10
+):
+    import numpy as np
+
+    # Kopiere, um Original zu schützen
+    row = df.iloc[-1].to_dict() if len(df) else {}
+
+    feature_map = {
+        "RSI": lambda r: r.get("RSI", np.nan),
+        "MACD": lambda r: r.get("MACD", np.nan),
+        "MACD_signal": lambda r: r.get("MACD_signal", np.nan),
+        "BB_upper": lambda r: r.get("BB_upper", np.nan),
+        "BB_lower": lambda r: r.get("BB_lower", np.nan),
+        "BB_range": lambda r: (r.get("BB_upper", np.nan) - r.get("BB_lower", np.nan))
+            if not np.isnan(r.get("BB_upper", np.nan)) and not np.isnan(r.get("BB_lower", np.nan)) else np.nan,
+        "Volatility": lambda r: r.get("Volatility", np.nan),
+        "Sentiment": lambda r: sentiment_score if sentiment_score is not None else np.nan,
+        "Finnhub_High": lambda r: finnhub_data["high"] if finnhub_data and "high" in finnhub_data else np.nan,
+        "Finnhub_Low": lambda r: finnhub_data["low"] if finnhub_data and "low" in finnhub_data else np.nan,
+        "Finnhub_Open": lambda r: finnhub_data["open"] if finnhub_data and "open" in finnhub_data else np.nan,
+        "Finnhub_PrevClose": lambda r: finnhub_data["prevclose"] if finnhub_data and "prevclose" in finnhub_data else np.nan,
+        # weitere Feature-Namen kannst du hier ergänzen
+    }
+
+    feats = []
+    if selected_features:
+        for feat in selected_features:
+            val = feature_map.get(feat, lambda r: np.nan)(row)
+            feats.append(val)
+    else:
+        # Fallback: alle Features, die im feature_map sind
+        for fname in feature_map:
+            feats.append(feature_map[fname](row))
+
+    # Rückgabe als DataFrame mit 1 Zeile (wie Modell erwartet)
+    import pandas as pd
+    if selected_features:
+        columns = selected_features
+    else:
+        columns = list(feature_map.keys())
+    return pd.DataFrame([feats], columns=columns)
+
 # ========================== KONSTANTEN & INTERVAL OPTIONS ==========================
 today_str = datetime.now().strftime("%Y-%m-%d")
 forecast_log_file = f"spy_forecast_log_{today_str}.csv"
@@ -1074,19 +1121,25 @@ for label, delta in interval_options:
     )
 
 # --- Reload Prognose (aktuell) für alle Intervalle via Modellvorhersage ---
-# Annahmen:
-# - model_dict: {'10 Sek': model_10s, '1 Min': model_1min, ...} (Modelle pro Intervall)
-# - build_features(df) gibt den letzten Feature-Vektor für das Modell zurück
 realtime_preds = []
 for label, delta in interval_options:
     model = model_dict.get(label)
     if model is not None:
-        # Features für letzten Datenpunkt bauen (ggf. anpassen!)
-        features = build_features(df.iloc[[-1]])
+        # Versuche, die für das Modell passenden Features zu bauen
+        selected_features = getattr(model, "selected_features", None)
         try:
+            # Nutze immer die letzten Zeile(n) aus df für die Prognose
+            features = build_features(
+                df.iloc[[-1]],
+                selected_features=selected_features,
+                sentiment_score=sentiment_score,
+                finnhub_data=finnhub_data,
+                # ggf. weitere Parameter wie volatility_window übergeben, falls nötig
+            )
             pred = model.predict(features)[0]
             realtime_preds.append(pred)
-        except Exception:
+        except Exception as e:
+            print(f"Fehler bei Prognose für {label}: {e}")
             realtime_preds.append(None)
     else:
         realtime_preds.append(None)
@@ -1230,66 +1283,6 @@ df_table = pd.DataFrame([
         ),
     }
     for i, d in enumerate(prognose_ergebnisse)
-])
-
-df_table = df_table.fillna("n/a")
-st.dataframe(df_table, use_container_width=True)
-
-# --- Tabelle unter dem Chart ---
-last_price = df["Price"].iloc[-1] if not df.empty and "Price" in df.columns else np.nan
-df_table = pd.DataFrame([
-    {
-        "Intervall": d["Intervall"],
-        "Kursprognose": (
-            "n/a" if d["Durchschnitt"] is None or np.isnan(d["Durchschnitt"]) or np.isnan(last_price)
-            else f"{last_price * (1 + d['Durchschnitt']):.2f}"
-        ),
-        "Prognose (%)": (
-            "n/a" if d["Durchschnitt"] is None or np.isnan(d["Durchschnitt"])
-            else f"{d['Durchschnitt']*100:+.2f}%"
-        ),
-        "ML-Eintrittswahrscheinlichkeit (%)": (
-            "n/a" if d["Wahrscheinlichkeit"] is None or np.isnan(d["Wahrscheinlichkeit"])
-            else f"{d['Wahrscheinlichkeit']*100:.1f}%"
-        ),
-        "Trefferquote (%)": (
-            "n/a" if d["Trefferquote"] is None or np.isnan(d["Trefferquote"])
-            else f"{d['Trefferquote']*100:.1f}%"
-        ),
-        "Reload Prognose (aktuell)": (
-            "n/a" if realtime_preds[i] is None or np.isnan(realtime_preds[i])
-            else f"{realtime_preds[i]*100:+.2f}%"
-        ),
-    }
-    for i, d in enumerate(prognose_ergebnisse)
-])
-
-df_table = df_table.fillna("n/a")
-st.dataframe(df_table, use_container_width=True)
-
-# --- Tabelle unter dem Chart, NUR EINMAL anzeigen! ---
-last_price = df["Price"].iloc[-1] if not df.empty and "Price" in df.columns else np.nan
-df_table = pd.DataFrame([
-    {
-        "Intervall": d["Intervall"],
-        "Kursprognose": (
-            "n/a" if d["Durchschnitt"] is None or np.isnan(d["Durchschnitt"]) or np.isnan(last_price)
-            else f"{last_price * (1 + d['Durchschnitt']):.2f}"
-        ),
-        "Prognose (%)": (
-            "n/a" if d["Durchschnitt"] is None or np.isnan(d["Durchschnitt"])
-            else f"{d['Durchschnitt']*100:+.2f}%"
-        ),
-        "ML-Eintrittswahrscheinlichkeit (%)": (
-            "n/a" if d["Wahrscheinlichkeit"] is None or np.isnan(d["Wahrscheinlichkeit"])
-            else f"{d['Wahrscheinlichkeit']*100:.1f}%"
-        ),
-        "Trefferquote (%)": (
-            "n/a" if d["Trefferquote"] is None or np.isnan(d["Trefferquote"])
-            else f"{d['Trefferquote']*100:.1f}%"
-        ),
-    }
-    for d in prognose_ergebnisse
 ])
 
 df_table = df_table.fillna("n/a")
@@ -1535,7 +1528,6 @@ def best_practice_report(
         })
 
         st.write("### [Best Practice] ML-Regression-Report (Zeitfenster-Daten)")
-        st.dataframe(df_report_disp, use_container_width=True)
 
         fig = make_subplots(specs=[[{"secondary_y": True}]])
 
@@ -1618,7 +1610,9 @@ def best_practice_report(
             color="orange"
         )
 
+        # Zuerst Grafik, dann Tabelle!
         st.plotly_chart(fig, use_container_width=True)
+        st.dataframe(df_report_disp, use_container_width=True)
     else:
         st.info("Nicht genügend Daten für Best-Practice-ML-Regression-Statistik.")
 
