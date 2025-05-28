@@ -832,6 +832,10 @@ if delta is not None:
         else:
             yaxis_range = None
 
+# ----- Y-ACHSE: MANUELLE ÜBERSCHREIBUNG AUS SIDEBAR -----
+if not use_autoscale and user_ymin is not None and user_ymax is not None:
+    yaxis_range = [user_ymin, user_ymax]
+
 # ========================== FORECAST & CHART ==========================
 if len(df) > 30:
     if show_sma: df["SMA"] = df["Price"].rolling(window=sma_window).mean()
