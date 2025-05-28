@@ -57,8 +57,87 @@ from nltk.sentiment.vader import SentimentIntensityAnalyzer
 from plotly.subplots import make_subplots
 import nltk
 from datetime import datetime
+from sklearn.metrics import mean_absolute_error
+
+def train_and_evaluate_regression(train, test, feature_cols, target_col="target"):
+    # Entferne Zeilen mit NaN
+    train = train.dropna(subset=feature_cols + [target_col])
+    test = test.dropna(subset=feature_cols + [target_col])
+    if len(train) == 0 or len(test) == 0:
+        # Optional: print("Nicht genug Daten für Training/Test")
+        return None, None, None, None, None, None, None
+    X_train, y_train = train[feature_cols], train[target_col]
+    X_test, y_test = test[feature_cols], test[target_col]
+    model = RandomForestRegressor(n_estimators=100, random_state=42)
+    model.fit(X_train, y_train)
+    preds = model.predict(X_test)
+    # Nochmals auf NaN checken (optional)
+    mask = ~np.isnan(preds)
+    preds = preds[mask]
+    y_test = y_test.iloc[mask]
+    if len(preds) == 0:
+        return model, preds, None, None, None, None, None
+    mae = mean_absolute_error(y_test, preds)
+    hitrate = np.mean(np.sign(y_test) == np.sign(preds))
+    avg_pred = np.mean(preds)
+    avg_true = np.mean(y_test)
+    std_pred = np.std(preds)
+    return model, preds, mae, hitrate, avg_pred, avg_true, std_pred
+
+def time_series_train_test_split(df, test_size=0.2):
+    split_idx = int(len(df) * (1 - test_size))
+    train = df.iloc[:split_idx]
+    test = df.iloc[split_idx:]
+    return train, test
 
 nltk.download('vader_lexicon', quiet=True)
+
+def build_features(
+    df,
+    selected_features=None,
+    sentiment_score=None,
+    finnhub_data=None,
+    volatility_window=10
+):
+    import numpy as np
+
+    # Kopiere, um Original zu schützen
+    row = df.iloc[-1].to_dict() if len(df) else {}
+
+    feature_map = {
+        "RSI": lambda r: r.get("RSI", np.nan),
+        "MACD": lambda r: r.get("MACD", np.nan),
+        "MACD_signal": lambda r: r.get("MACD_signal", np.nan),
+        "BB_upper": lambda r: r.get("BB_upper", np.nan),
+        "BB_lower": lambda r: r.get("BB_lower", np.nan),
+        "BB_range": lambda r: (r.get("BB_upper", np.nan) - r.get("BB_lower", np.nan))
+            if not np.isnan(r.get("BB_upper", np.nan)) and not np.isnan(r.get("BB_lower", np.nan)) else np.nan,
+        "Volatility": lambda r: r.get("Volatility", np.nan),
+        "Sentiment": lambda r: sentiment_score if sentiment_score is not None else np.nan,
+        "Finnhub_High": lambda r: finnhub_data["high"] if finnhub_data and "high" in finnhub_data else np.nan,
+        "Finnhub_Low": lambda r: finnhub_data["low"] if finnhub_data and "low" in finnhub_data else np.nan,
+        "Finnhub_Open": lambda r: finnhub_data["open"] if finnhub_data and "open" in finnhub_data else np.nan,
+        "Finnhub_PrevClose": lambda r: finnhub_data["prevclose"] if finnhub_data and "prevclose" in finnhub_data else np.nan,
+        # weitere Feature-Namen kannst du hier ergänzen
+    }
+
+    feats = []
+    if selected_features:
+        for feat in selected_features:
+            val = feature_map.get(feat, lambda r: np.nan)(row)
+            feats.append(val)
+    else:
+        # Fallback: alle Features, die im feature_map sind
+        for fname in feature_map:
+            feats.append(feature_map[fname](row))
+
+    # Rückgabe als DataFrame mit 1 Zeile (wie Modell erwartet)
+    import pandas as pd
+    if selected_features:
+        columns = selected_features
+    else:
+        columns = list(feature_map.keys())
+    return pd.DataFrame([feats], columns=columns)
 
 # ========================== KONSTANTEN & INTERVAL OPTIONS ==========================
 today_str = datetime.now().strftime("%Y-%m-%d")
@@ -360,6 +439,8 @@ def robust_live_logging(
     finnhub_data=None,
     volatility_window=10
 ):
+    import os
+    import pandas as pd
     import joblib
     import numpy as np
 
@@ -950,86 +1031,122 @@ import os
 import numpy as np
 import pandas as pd
 import joblib
+import datetime
 from plotly.subplots import make_subplots
 
-import os
-import numpy as np
-import pandas as pd
-import joblib
-
-# --- ML-Prognose & ML-Treffer für Statistik erzeugen ---
-# Stelle sicher, dass "Forecast" (ML-Return-Prediction) bereits im DataFrame ist!
-
-# 1. ML_Prognose erzeugen (direkte Kopie von Forecast)
 # --- ML-Prognose (Return!) erzeugen ---
-# Stelle sicher, dass "Forecast" der RETURN ist (z.B. 0.003 = +0.3%)
-# Falls Forecast ein Kurs ist, rechne um:
 if "Forecast" in df.columns and "Price" in df.columns:
-    df["ML_Prognose"] = (df["Forecast"] / df["Price"]) - 1 if (df["Forecast"] > 10).any() else df["Forecast"]
+    if (df["Forecast"] > 10).any():
+        df["ML_Prognose"] = (df["Forecast"] / df["Price"]) - 1
+    else:
+        df["ML_Prognose"] = df["Forecast"]
 else:
     df["ML_Prognose"] = np.nan
 
-# --- ML_Treffer berechnen (richtige Richtung vorhergesagt?) ---
-n_steps = 5  # Prognosehorizont in Schritten (z.B. 5 für 5min bei 1min-Daten, ggf. anpassen)
-df["Future_Return"] = df["Price"].shift(-n_steps) / df["Price"] - 1
-df["ML_Treffer"] = np.where(
-    (~df["ML_Prognose"].isna()) & (~df["Future_Return"].isna()),
-    np.where(
-        ((df["ML_Prognose"] > 0) & (df["Future_Return"] > 0)) |
-        ((df["ML_Prognose"] < 0) & (df["Future_Return"] < 0)),
-        1, 0
-    ),
-    np.nan
-)
+# --- Zielwert-Berechnung mit Handelsende-Logik ---
+def add_target_return_for_timedelta_with_handelsende(
+    df, delta, price_col="Price", target_col="target", close_time=datetime.time(22, 0)
+):
+    df = df.copy()
+    df[target_col] = np.nan
+    if df.empty:
+        return df
+    # Robust: times sicher zu DatetimeIndex casten
+    if not isinstance(df.index, pd.DatetimeIndex):
+        times = pd.to_datetime(df["Time"], errors="coerce")
+    else:
+        times = df.index
+    times = pd.DatetimeIndex(times)
+    delta = pd.to_timedelta(delta) if delta is not None else None
+    for i in range(len(df)):
+        t0 = times[i]
+        if pd.isnull(t0):
+            continue
+        if delta is not None:
+            t1 = t0 + delta
+            if t1.time() > close_time:
+                continue
+            future_idx = np.where(times >= t1)[0]
+            if len(future_idx) > 0:
+                j = future_idx[0]
+                df.iloc[i, df.columns.get_loc(target_col)] = (
+                    df.iloc[j][price_col] / df.iloc[i][price_col] - 1
+                )
+        else:
+            t_tag = t0.date()
+            mask = (times.date == t_tag) & (times.time <= close_time)
+            if mask.any():
+                t_end = times[mask][-1]
+                df.at[t0, target_col] = (
+                    df.loc[t_end][price_col] / df.loc[t0][price_col] - 1
+                )
+    return df
 
 # --- Intervall-Statistik-Berechnung ---
 prognose_ergebnisse = []
-realtime_10s_preds = []
-for interval_idx, (label, delta) in enumerate(interval_options[:-1]):
-    stop = df.index.max()
-    start = stop - delta
-    df_interval = df[(df.index > start) & (df.index <= stop)].copy()
+model_dict = {}  # <-- HIER initialisieren
+realtime_preds = []  # Für alle Intervalle jeweils die aktuelle (letzte) Prognose
 
-    if len(df_interval) == 0:
-        prognose_ergebnisse.append({
+for label, delta in interval_options:
+    df_target = add_target_return_for_timedelta_with_handelsende(df, delta)
+    if not df_target.empty and df_target["target"].notna().sum() > 50:
+        feature_cols = [col for col in df_target.columns if col not in ["Time", "Price", "target"]]
+        train, test = time_series_train_test_split(df_target)
+        model, preds, mae, hitrate, avg_pred, avg_true, std_pred = train_and_evaluate_regression(
+            train, test, feature_cols, target_col="target"
+        )
+        model_dict[label] = {"model": model, "selected_features": feature_cols}
+
+    # Statistik für das Intervall
+    valid = (~df_target["target"].isna()) & (~df_target["ML_Prognose"].isna())
+    if valid.any():
+        avg_prognose = df_target.loc[valid, "ML_Prognose"].mean()
+        wahrscheinlichkeit = (df_target.loc[valid, "ML_Prognose"] > 0).mean()
+        trefferquote = (
+            np.sign(df_target.loc[valid, "ML_Prognose"])
+            == np.sign(df_target.loc[valid, "target"])
+        ).mean()
+        sample_size = valid.sum()
+    else:
+        avg_prognose = wahrscheinlichkeit = trefferquote = sample_size = None
+
+    prognose_ergebnisse.append(
+        {
             "Intervall": label,
             "Durchschnitt": avg_prognose,
             "Wahrscheinlichkeit": wahrscheinlichkeit,
             "Trefferquote": trefferquote,
-            "Samplegröße": len(df_interval)
-        })
-    # 10s Prognose für den aktuellsten Wert (nur für das 10 Sek-Intervall, sonst None)
-    if label == "10 Sek":
-        if "ML_Prognose" in df.columns and not df["ML_Prognose"].empty and not np.isnan(df["ML_Prognose"].iloc[-1]):
-            realtime_10s_preds.append(df["ML_Prognose"].iloc[-1])
-        else:
-            realtime_10s_preds.append(None)
+            "Samplegröße": sample_size,
+        }
+    )
+
+# --- Reload Prognose (aktuell) für alle Intervalle via Modellvorhersage ---
+realtime_preds = []
+for label, delta in interval_options:
+    model_entry = model_dict.get(label)
+    if model_entry is not None:
+        model = model_entry["model"]
+        selected_features = model_entry["selected_features"]
+        try:
+            # Nutze immer die letzten Zeile(n) aus df für die Prognose
+            features = build_features(
+                df.iloc[[-1]],
+                selected_features=selected_features,
+                sentiment_score=sentiment_score,
+                finnhub_data=finnhub_data,
+                # ggf. weitere Parameter wie volatility_window übergeben, falls nötig
+            )
+            pred = model.predict(features)[0]
+            realtime_preds.append(pred)
+        except Exception as e:
+            print(f"Fehler bei Prognose für {label}: {e}")
+            print("Features:", features)
+            print("selected_features:", selected_features)
+            realtime_preds.append(None)
     else:
-        realtime_10s_preds.append(None)
+        realtime_preds.append(None)
 
-    if "ML_Prognose" in df_interval and not df_interval["ML_Prognose"].dropna().empty:
-        avg_prognose = df_interval["ML_Prognose"].mean()
-        wahrscheinlichkeit = (df_interval["ML_Prognose"] > 0).mean()
-    else:
-        avg_prognose = None
-        wahrscheinlichkeit = None
-
-    # Trefferquote
-    if "ML_Treffer" in df_interval and len(df_interval["ML_Treffer"].dropna()) > 1:
-        trefferquote = df_interval["ML_Treffer"].mean()
-    else:
-        trefferquote = None
-
-    prognose_ergebnisse.append({
-        "Intervall": label,
-        "Durchschnitt": avg_prognose,
-        "Wahrscheinlichkeit": wahrscheinlichkeit,
-        "Trefferquote": trefferquote,
-        "Samplegröße": len(df_interval)
-    })
-
-
-# ==================== Plotly Chart ====================
+# --- Plotly Chart mit ALLEN aktuellen Prognosen ("Reload Prognose (aktuell)") ---
 def pct_label(vals, digits=1):
     return [f"{v:.{digits}f}%" if v is not None and not np.isnan(v) else "n/a" for v in vals]
 
@@ -1037,11 +1154,11 @@ x_vals = [d["Intervall"] for d in prognose_ergebnisse]
 wahrsch = [d["Wahrscheinlichkeit"]*100 if d["Wahrscheinlichkeit"] is not None else None for d in prognose_ergebnisse]
 trefferquote = [d["Trefferquote"]*100 if d["Trefferquote"] is not None else None for d in prognose_ergebnisse]
 durchschnitt = [d["Durchschnitt"]*100 if d["Durchschnitt"] is not None else None for d in prognose_ergebnisse]
-reload_10s = [v*100 if v is not None else None for v in realtime_10s_preds]
+reload_all = [v*100 if v is not None else None for v in realtime_preds]
 
 fig_bar = make_subplots(specs=[[{"secondary_y": True}]])
 
-# Prognose-Linie (im Vordergrund, kräftig)
+# Durchschnittliche ML-Prognose-Linie
 fig_bar.add_trace(
     go.Scatter(
         x=x_vals,
@@ -1058,16 +1175,16 @@ fig_bar.add_trace(
     secondary_y=False,
 )
 
-# 10s Reload Prognose (gestrichelt, kräftig)
+# Reload Prognose (aktuell) für ALLE Intervalle als gepunktete Linie
 fig_bar.add_trace(
     go.Scatter(
         x=x_vals,
-        y=reload_10s,
-        name="10s Reload Prognose (aktuell)",
+        y=reload_all,
+        name="Reload Prognose (aktuell, alle Intervalle)",
         mode="lines+markers+text",
         line=dict(color="#b80057", width=3, dash="dot"),
         marker=dict(size=9, color="#b80057"),
-        text=pct_label(reload_10s),
+        text=pct_label(reload_all),
         textposition="bottom center",
         textfont=dict(size=10, color="#b80057", family="Arial"),
         opacity=0.95,
@@ -1075,7 +1192,7 @@ fig_bar.add_trace(
     secondary_y=False,
 )
 
-# Wahrscheinlichkeit als Balken (kräftiges Grün, leicht transparent)
+# Wahrscheinlichkeit als Balken
 fig_bar.add_trace(
     go.Bar(
         x=x_vals,
@@ -1091,7 +1208,7 @@ fig_bar.add_trace(
     secondary_y=True,
 )
 
-# Trefferquote als Linie (dünn, Pastell)
+# Trefferquote als Linie
 fig_bar.add_trace(
     go.Scatter(
         x=x_vals,
@@ -1141,7 +1258,7 @@ fig_bar.update_yaxes(
 
 st.plotly_chart(fig_bar, use_container_width=True)
 
-# --- Tabelle unter dem Chart, NUR EINMAL anzeigen! ---
+# --- Tabelle unter dem Chart ---
 last_price = df["Price"].iloc[-1] if not df.empty and "Price" in df.columns else np.nan
 df_table = pd.DataFrame([
     {
@@ -1162,8 +1279,12 @@ df_table = pd.DataFrame([
             "n/a" if d["Trefferquote"] is None or np.isnan(d["Trefferquote"])
             else f"{d['Trefferquote']*100:.1f}%"
         ),
+        "Reload Prognose (aktuell)": (
+            "n/a" if realtime_preds[i] is None or np.isnan(realtime_preds[i])
+            else f"{realtime_preds[i]*100:+.2f}%"
+        ),
     }
-    for d in prognose_ergebnisse
+    for i, d in enumerate(prognose_ergebnisse)
 ])
 
 df_table = df_table.fillna("n/a")
@@ -1249,6 +1370,35 @@ def add_target_classification_for_timedelta(df, delta: pd.Timedelta, threshold=0
         [-np.inf, -threshold, threshold, np.inf],
         labels=["Down", "Neutral", "Up"]
     )
+    return df
+
+import datetime
+def add_target_return_for_timedelta_with_handelsende(df, delta, price_col="Price", target_col="target", close_time=datetime.time(22, 0)):
+    df = df.copy()
+    df[target_col] = np.nan
+    if df.empty:
+       return df
+    times = pd.to_datetime(df["Time"]) if not isinstance(df.index, pd.DatetimeIndex) else df.index
+    delta = pd.to_timedelta(delta) if delta is not None else None
+    for i in range(len(df)):
+        t0 = times[i]
+        if delta is not None:
+            t1 = t0 + delta
+            # WENN Ziel nach Handelsschluss, dann kein Label!
+            if t1.time() > close_time:
+                continue
+            # Finde ersten Index >= t1
+            future_idx = np.where(times >= t1)[0]
+            if len(future_idx) > 0:
+                j = future_idx[0]
+                df.iloc[i, df.columns.get_loc(target_col)] = df.iloc[j][price_col] / df.iloc[i][price_col] - 1
+        else:
+            # Spezialfall: Bis Handelsende
+            t_tag = t0.date()
+            mask = (times.date == t_tag) & (times.time <= close_time)
+            if mask.any():
+                t_end = times[mask][-1]
+                df.at[t0, target_col] = df.loc[t_end][price_col] / df.loc[t0][price_col] - 1
     return df
 
 # --- 2. Zeitreihen-Split ---
@@ -1380,7 +1530,6 @@ def best_practice_report(
         })
 
         st.write("### [Best Practice] ML-Regression-Report (Zeitfenster-Daten)")
-        st.dataframe(df_report_disp, use_container_width=True)
 
         fig = make_subplots(specs=[[{"secondary_y": True}]])
 
@@ -1463,7 +1612,9 @@ def best_practice_report(
             color="orange"
         )
 
+        # Zuerst Grafik, dann Tabelle!
         st.plotly_chart(fig, use_container_width=True)
+        st.dataframe(df_report_disp, use_container_width=True)
     else:
         st.info("Nicht genügend Daten für Best-Practice-ML-Regression-Statistik.")
 
