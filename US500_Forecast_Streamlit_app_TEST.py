@@ -1,18 +1,9 @@
 #Mount Google drive for logs
-from datetime import datetime
-import os
-
-# Nur EINMAL Drive-Mount am Anfang des Notebooks (nicht im app_code!)
 from google.colab import drive
 drive.mount('/content/drive')
-
+import os
 drive_folder = '/content/drive/My Drive/PrognoseLogs'
 os.makedirs(drive_folder, exist_ok=True)
-
-today_str = datetime.now().strftime("%Y-%m-%d")
-forecast_log_file = os.path.join(drive_folder, f"spy_forecast_log_{today_str}.csv")
-intraday_history_file = os.path.join(drive_folder, "spy_intraday_history.csv")
-LOG_FILES = [forecast_log_file, intraday_history_file]
 
 # 🚀 Setup für US500 Forecast App (inkl. Cleanup & Backup)
 
@@ -27,6 +18,7 @@ from nltk.sentiment.vader import SentimentIntensityAnalyzer
 from datetime import datetime
 import glob
 
+LOG_FILES = ["spy_forecast_log.csv"]
 RESET_LOGS = False
 APP_FILENAME = "app.py"
 APP_PORT = 8501
@@ -77,6 +69,10 @@ from pytrends.request import TrendReq
 
 drive_folder = '/content/drive/My Drive/PrognoseLogs'
 os.makedirs(drive_folder, exist_ok=True)
+today_str = datetime.now().strftime("%Y-%m-%d")
+forecast_log_file = os.path.join(drive_folder, f"spy_forecast_log_{today_str}.csv")
+intraday_history_file = os.path.join(drive_folder, "spy_intraday_history.csv")
+LOG_FILES = [forecast_log_file, intraday_history_file]
 
 finbert_tokenizer = AutoTokenizer.from_pretrained('yiyanghkust/finbert-tone')
 finbert_model = AutoModelForSequenceClassification.from_pretrained('yiyanghkust/finbert-tone')
@@ -591,6 +587,23 @@ def calc_features(row, sentiment_score, selected_features, finnhub_data, volatil
             sentiment_score if sentiment_score is not None else 0
         ]
     return feats
+
+from datetime import datetime
+
+def save_forecast_logs(df, drive_folder):
+    """
+    Speichert das Tages-Log als CSV sowohl im Google Drive (drive_folder)
+    als auch lokal im aktuellen Arbeitsverzeichnis in Colab.
+    """
+    today_str = datetime.now().strftime("%Y-%m-%d")
+    drive_path = os.path.join(drive_folder, f"spy_forecast_log_{today_str}.csv")
+    local_path = f"spy_forecast_log_{today_str}_local_colab.csv"
+
+    df.to_csv(drive_path, index=False)
+    df.to_csv(local_path, index=False)
+
+    print(f"Tageslog gespeichert in Drive: {drive_path}")
+    print(f"Tageslog zusätzlich lokal gespeichert: {local_path}")
 
 def robust_live_logging(
     price,
@@ -1205,15 +1218,11 @@ if len(df) > 30:
     )
     st.plotly_chart(fig, use_container_width=True)
 
-    if csv_export:
-        # 1. In Drive speichern
-        df.to_csv(csv_path, index=False)
-        # 2. Zusätzlich lokal in Colab speichern
-        save_daily_local_log(df)
-        # 3. Download-Button bereitstellen
-        st.download_button("Log als CSV", df.to_csv(csv_path, index=False), file_name="log.csv", mime="text/csv")
-    else:
-        st.warning("Noch nicht genügend Preisdaten für Analyse verfügbar.")
+    # Immer nach jedem Forecast das Log sowohl in Drive als auch lokal speichern
+    save_forecast_logs(df, drive_folder)
+
+    # Optional: Download-Button immer anzeigen (oder nur wenn genug Daten vorhanden sind)
+    st.download_button("Log als CSV", df.to_csv(index=False), file_name="log.csv", mime="text/csv")
 
 # ==== Statistik- und ML-Tabellen wie gehabt ====
 import os
@@ -1877,7 +1886,7 @@ print(f"🔗 App erreichbar unter:\n{public_url}")
 import joblib
 
 # 1. File laden
-model_data = joblib.load("forecast_model_15min.pkl")
+model_data = joblib.load('/content/drive/My Drive/PrognoseLogs/forecast_model_15min.pkl')
 
 # 2. Aufbau checken
 print("Typ:", type(model_data))
@@ -1900,4 +1909,3 @@ print("Dummy-Prediction:", model_data['model'].predict(features))
 importances = model_data['model'].feature_importances_
 for feat, imp in zip(model_data['selected_features'], importances):
     print(f"{feat}: {imp:.3f}")
-
