@@ -1,3 +1,15 @@
+#Mount drive for historic logs
+from google.colab import drive
+drive.mount('/content/drive')
+
+import os
+
+# Lege deinen Ordner an (nur beim ersten Mal nötig)
+drive_folder = '/content/drive/My Drive/PrognoseLogs'
+os.makedirs(drive_folder, exist_ok=True)
+
+csv_path = os.path.join(drive_folder, "meine_logdatei.csv")
+
 # 🚀 Setup für US500 Forecast App (inkl. Cleanup & Backup)
 
 !pip install yfinance streamlit streamlit-autorefresh scikit-learn matplotlib plotly pyngrok pandas_datareader snscrape nltk --quiet
@@ -153,7 +165,7 @@ def build_features(
 today_str = datetime.now().strftime("%Y-%m-%d")
 forecast_log_file = f"spy_forecast_log_{today_str}.csv"
 LOG_FILES = [forecast_log_file, "spy_intraday_history.csv"]
-MODEL_FILE = "forecast_model_5min.pkl"
+MODEL_FILE = "forecast_model_15min.pkl"
 REPAIRED_LOG_FILE = "spy_forecast_log_repaired.csv"
 FINNHUB_API_KEY = "d0ldkdhr01qhb027s8fgd0ldkdhr01qhb027s8g0"
 RESET_LOGS = False
@@ -191,6 +203,46 @@ for file in LOG_FILES:
                 ts = datetime.now().strftime("%Y%m%d_%H%M")
                 shutil.copy(file, f"{file.replace('.csv','')}_backup_{ts}.csv")
 
+import datetime
+
+def add_target_return_for_timedelta_with_handelsende(
+    df, delta, price_col="Price", target_col="target", close_time=datetime.time(22, 0)
+):
+    df = df.copy()
+    df[target_col] = np.nan
+    if df.empty:
+        return df
+    # Robust: times sicher zu DatetimeIndex casten
+    if not isinstance(df.index, pd.DatetimeIndex):
+        times = pd.to_datetime(df["Time"], errors="coerce")
+    else:
+        times = df.index
+    times = pd.DatetimeIndex(times)
+    delta = pd.to_timedelta(delta) if delta is not None else None
+    for i in range(len(df)):
+        t0 = times[i]
+        if pd.isnull(t0):
+            continue
+        if delta is not None:
+            t1 = t0 + delta
+            if t1.time() > close_time:
+                continue
+            future_idx = np.where(times >= t1)[0]
+            if len(future_idx) > 0:
+                j = future_idx[0]
+                df.iloc[i, df.columns.get_loc(target_col)] = (
+                    df.iloc[j][price_col] / df.iloc[i][price_col] - 1
+                )
+        else:
+            t_tag = t0.date()
+            mask = (times.date == t_tag) & (times.time <= close_time)
+            if mask.any():
+                t_end = times[mask][-1]
+                df.at[t0, target_col] = (
+                    df.loc[t_end][price_col] / df.loc[t0][price_col] - 1
+                )
+    return df
+
 # ========================== ML: Dummy-Modell & Auto-Training ==========================
 def create_dummy_model():
     X_dummy = pd.DataFrame({
@@ -223,7 +275,7 @@ def load_all_logs(log_patterns=["spy_forecast_log*.csv", "spy_intraday_history*.
     df_all = df_all.drop_duplicates(subset=["Time"])
     return df_all
 
-def ensure_target_column(df, n_steps=5):
+def ensure_target_column(df, n_steps=15):
     if "target" not in df.columns and "Price" in df.columns:
         df = df.sort_values("Time")
         df["target"] = df["Price"].shift(-n_steps) / df["Price"] - 1
@@ -544,7 +596,7 @@ def robust_live_logging(
     sentiment_score,
     df,
     log_file="spy_forecast_log.csv",
-    model_file="forecast_model_5min.pkl",
+    model_file="forecast_model_15min.pkl",
     finnhub_data=None,
     volatility_window=10
 ):
@@ -868,8 +920,26 @@ if price is not None:
         df = df[~df.index.duplicated(keep='last')]
     st.session_state.df = df
 
-
 # ----- Prognose-Berechnung und -Ausgabe -----
+# Fortschritt für das 15-Minuten-Prognosemodell anzeigen
+import streamlit as st
+
+min_required = 50
+df_target = add_target_return_for_timedelta_with_handelsende(df, pd.Timedelta(minutes=15))
+valid_targets = df_target["target"].notna().sum()
+remaining = max(0, min_required - valid_targets)
+model_entry = model_dict.get("15 Min") if "model_dict" in locals() else None
+
+if remaining > 0:
+    # Datenpunkte-Countdown
+    st.info(f"Für eine 15-Minuten-Prognose fehlen noch {remaining} Datenpunkte "
+            f"(aktuell: {valid_targets} von {min_required} benötigt).")
+    st.progress(valid_targets / min_required)
+elif model_entry is None:
+    # Modell-Hinweis
+    st.info("Das Prognose-Modell wird neu trainiert ... bitte warten. ")
+# else: Prognose anzeigen
+
 # Hole das Modell für das 15-Minuten-Intervall
 target_label = "15 Min"
 prognose_aktuell = None
@@ -1073,7 +1143,7 @@ if len(df) > 30:
     if show_volatility and "Volatility" in df:
         fig.add_trace(go.Scatter(x=df.index, y=df["Volatility"], name=f"Volatility ({volatility_window})", yaxis="y4", line=dict(width=1)))
     if "Forecast" in df and not df["Forecast"].isnull().all():
-        fig.add_trace(go.Scatter(x=df.index, y=df["Forecast"], name="Forecast (5min)", line=dict(dash="dot", color="orange", width=2)))
+        fig.add_trace(go.Scatter(x=df.index, y=df["Forecast"], name="Forecast (15min)", line=dict(dash="dot", color="orange", width=2)))
 
     fig.update_layout(
         height=800,
@@ -1098,7 +1168,8 @@ if len(df) > 30:
             anchor="free",
             position=0.88,
             title_font=dict(size=18),
-            tickfont=dict(size=15)
+            tickfont=dict(size=15),
+            showgrid=False
         ),
         yaxis3=dict(
             title="RSI",
@@ -1107,7 +1178,8 @@ if len(df) > 30:
             anchor="free",
             position=0.93,
             title_font=dict(size=18),
-            tickfont=dict(size=15)
+            tickfont=dict(size=15),
+            showgrid=False
         ),
         yaxis4=dict(
             title="Volatility",
@@ -1116,7 +1188,8 @@ if len(df) > 30:
             anchor="free",
             position=0.98,
             title_font=dict(size=18),
-            tickfont=dict(size=15)
+            tickfont=dict(size=15),
+            showgrid=False
         ),
         hovermode="x unified",
         uirevision="persistent",
@@ -1132,7 +1205,7 @@ if len(df) > 30:
     st.plotly_chart(fig, use_container_width=True)
 
     if csv_export:
-        st.download_button("Log als CSV", df.to_csv(index=True), file_name="log.csv", mime="text/csv")
+        st.download_button("Log als CSV", df.to_csv(csv_path, index=False), file_name="log.csv", mime="text/csv")
 else:
     st.warning("Noch nicht genügend Preisdaten für Analyse verfügbar.")
 
@@ -1363,7 +1436,8 @@ fig_bar.update_yaxes(
     secondary_y=True,
     range=[0, 100],
     tickformat=".0f'%'",
-    color="orange"
+    color="orange",
+    showgrid=False
 )
 
 st.plotly_chart(fig_bar, use_container_width=True)
@@ -1712,14 +1786,16 @@ def best_practice_report(
         )
         fig.update_yaxes(
             title_text="Fehler/Mittelwerte",
-            secondary_y=False
+            secondary_y=False,
+            showgrid=False
         )
         fig.update_yaxes(
             title_text="Trefferquote",
             secondary_y=True,
             range=[0,1],
             tickformat=".0%",
-            color="orange"
+            color="orange",
+            showgrid=False
         )
 
         # Zuerst Grafik, dann Tabelle!
@@ -1795,7 +1871,7 @@ print(f"🔗 App erreichbar unter:\n{public_url}")
 import joblib
 
 # 1. File laden
-model_data = joblib.load("forecast_model_5min.pkl")
+model_data = joblib.load("forecast_model_15min.pkl")
 
 # 2. Aufbau checken
 print("Typ:", type(model_data))
@@ -1818,3 +1894,4 @@ print("Dummy-Prediction:", model_data['model'].predict(features))
 importances = model_data['model'].feature_importances_
 for feat, imp in zip(model_data['selected_features'], importances):
     print(f"{feat}: {imp:.3f}")
+
