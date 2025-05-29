@@ -162,11 +162,14 @@ def build_features(
     return pd.DataFrame([feats], columns=columns)
 
 # ========================== KONSTANTEN & INTERVAL OPTIONS ==========================
+from datetime import datetime
+
 today_str = datetime.now().strftime("%Y-%m-%d")
-forecast_log_file = f"spy_forecast_log_{today_str}.csv"
-LOG_FILES = [forecast_log_file, "spy_intraday_history.csv"]
-MODEL_FILE = "forecast_model_15min.pkl"
-REPAIRED_LOG_FILE = "spy_forecast_log_repaired.csv"
+forecast_log_file = os.path.join(drive_folder, f"spy_forecast_log_{today_str}.csv")
+intraday_history_file = os.path.join(drive_folder, "spy_intraday_history.csv")
+LOG_FILES = [forecast_log_file, intraday_history_file]
+MODEL_FILE = os.path.join(drive_folder, "forecast_model_15min.pkl")
+REPAIRED_LOG_FILE = os.path.join(drive_folder, "spy_forecast_log_repaired.csv")
 FINNHUB_API_KEY = "d0ldkdhr01qhb027s8fgd0ldkdhr01qhb027s8g0"
 RESET_LOGS = False
 
@@ -261,7 +264,9 @@ def create_dummy_model():
 def load_all_logs(log_patterns=["spy_forecast_log*.csv", "spy_intraday_history*.csv"]):
     files = []
     for pat in log_patterns:
-        files.extend(glob.glob(pat))
+        # Passe das Pattern an, damit es im Drive-Ordner sucht
+        full_pattern = os.path.join(drive_folder, pat)
+        files.extend(glob.glob(full_pattern))
     dfs = []
     for file in files:
         try:
