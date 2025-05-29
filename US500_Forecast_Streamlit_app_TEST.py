@@ -1,14 +1,18 @@
-#Mount drive for historic logs
+#Mount Google drive for logs
+from datetime import datetime
+import os
+
+# Nur EINMAL Drive-Mount am Anfang des Notebooks (nicht im app_code!)
 from google.colab import drive
 drive.mount('/content/drive')
 
-import os
-
-# Lege deinen Ordner an (nur beim ersten Mal nötig)
 drive_folder = '/content/drive/My Drive/PrognoseLogs'
 os.makedirs(drive_folder, exist_ok=True)
 
-csv_path = os.path.join(drive_folder, "meine_logdatei.csv")
+today_str = datetime.now().strftime("%Y-%m-%d")
+forecast_log_file = os.path.join(drive_folder, f"spy_forecast_log_{today_str}.csv")
+intraday_history_file = os.path.join(drive_folder, "spy_intraday_history.csv")
+LOG_FILES = [forecast_log_file, intraday_history_file]
 
 # 🚀 Setup für US500 Forecast App (inkl. Cleanup & Backup)
 
@@ -22,7 +26,6 @@ from pyngrok import conf, ngrok
 from nltk.sentiment.vader import SentimentIntensityAnalyzer
 from datetime import datetime
 import glob
-today_str = datetime.now().strftime("%Y-%m-%d")
 
 RESET_LOGS = False
 APP_FILENAME = "app.py"
@@ -38,11 +41,6 @@ NGROK_TOKEN = "2xB84xP48MVVpa7WOjuVT9OgiUI_2pDz4T89jbtkBdgvrLtV4"
 !rm -rf __pycache__ */__pycache__ *.pyc
 !rm -rf /root/.ngrok2 /root/.config/ngrok
 !streamlit cache clear
-
-# Jeden Tag ein neues Logfile für Forecast-Log
-today_str = datetime.now().strftime("%Y-%m-%d")
-forecast_log_file = f"spy_forecast_log_{today_str}.csv"
-LOG_FILES = [forecast_log_file, "spy_intraday_history.csv"]
 
 # Backup/Reset nur, wenn das File heute noch nicht existiert
 for file in LOG_FILES:
@@ -77,6 +75,8 @@ import torch
 import praw
 from pytrends.request import TrendReq
 
+drive_folder = '/content/drive/My Drive/PrognoseLogs'
+os.makedirs(drive_folder, exist_ok=True)
 
 finbert_tokenizer = AutoTokenizer.from_pretrained('yiyanghkust/finbert-tone')
 finbert_model = AutoModelForSequenceClassification.from_pretrained('yiyanghkust/finbert-tone')
@@ -164,10 +164,6 @@ def build_features(
 # ========================== KONSTANTEN & INTERVAL OPTIONS ==========================
 from datetime import datetime
 
-today_str = datetime.now().strftime("%Y-%m-%d")
-forecast_log_file = os.path.join(drive_folder, f"spy_forecast_log_{today_str}.csv")
-intraday_history_file = os.path.join(drive_folder, "spy_intraday_history.csv")
-LOG_FILES = [forecast_log_file, intraday_history_file]
 MODEL_FILE = os.path.join(drive_folder, "forecast_model_15min.pkl")
 REPAIRED_LOG_FILE = os.path.join(drive_folder, "spy_forecast_log_repaired.csv")
 FINNHUB_API_KEY = "d0ldkdhr01qhb027s8fgd0ldkdhr01qhb027s8g0"
@@ -1218,13 +1214,6 @@ if len(df) > 30:
         st.download_button("Log als CSV", df.to_csv(csv_path, index=False), file_name="log.csv", mime="text/csv")
     else:
         st.warning("Noch nicht genügend Preisdaten für Analyse verfügbar.")
-
-    def save_daily_local_log(df):
-        """Speichert das Tageslog auch lokal in Colab (wird überschrieben)."""
-        today_str = datetime.now().strftime("%Y-%m-%d")
-        local_filename = f"spy_forecast_log_{today_str}_local_colab.csv"
-        df.to_csv(local_filename, index=False)
-        print(f"Lokales Tagesfile gespeichert: {local_filename}")
 
 # ==== Statistik- und ML-Tabellen wie gehabt ====
 import os
