@@ -2,6 +2,8 @@
 
 !pip install yfinance streamlit streamlit-autorefresh scikit-learn matplotlib plotly pyngrok pandas_datareader snscrape nltk --quiet
 !pip install pyngrok --index-url=https://pypi.org/simple
+!pip install transformers torch praw pytrends
+!pip install GoogleNews
 
 import os, shutil, datetime, time, socket, subprocess
 from pyngrok import conf, ngrok
@@ -58,6 +60,14 @@ from plotly.subplots import make_subplots
 import nltk
 from datetime import datetime
 from sklearn.metrics import mean_absolute_error
+from transformers import AutoTokenizer, AutoModelForSequenceClassification
+import torch
+import praw
+from pytrends.request import TrendReq
+
+
+finbert_tokenizer = AutoTokenizer.from_pretrained('yiyanghkust/finbert-tone')
+finbert_model = AutoModelForSequenceClassification.from_pretrained('yiyanghkust/finbert-tone')
 
 def train_and_evaluate_regression(train, test, feature_cols, target_col="target"):
     # Entferne Zeilen mit NaN
@@ -278,6 +288,16 @@ def get_price(ticker):
         return None
 
 analyzer = SentimentIntensityAnalyzer()
+def analyze_sentiment_finbert(texts):
+    inputs = finbert_tokenizer(texts, return_tensors='pt', padding=True, truncation=True)
+    with torch.no_grad():
+        outputs = finbert_model(**inputs)
+    scores = torch.nn.functional.softmax(outputs.logits, dim=-1)
+    sentiments = scores.numpy()
+    avg_sentiment = sentiments.mean(axis=0)
+    compound = avg_sentiment[0] - avg_sentiment[2]
+    return compound
+
 def get_sentiment_finviz():
     try:
         url = f"https://finviz.com/quote.ashx?t=ES=F"
@@ -289,6 +309,8 @@ def get_sentiment_finviz():
         headlines = [row.find("a").get_text(strip=True) for row in news_table.find_all("tr") if row.find("a")]
         if not headlines:
             return (0.0, [])
+        from nltk.sentiment.vader import SentimentIntensityAnalyzer
+        analyzer = SentimentIntensityAnalyzer()
         scores = [analyzer.polarity_scores(h)["compound"] for h in headlines]
         return (np.mean(scores), headlines)
     except Exception:
@@ -303,26 +325,113 @@ def get_sentiment_yahoo():
         headlines = [item.get_text(strip=True) for item in soup.find_all("h4", class_="s-title")]
         if not headlines:
             return (0.0, [])
+        from nltk.sentiment.vader import SentimentIntensityAnalyzer
+        analyzer = SentimentIntensityAnalyzer()
         scores = [analyzer.polarity_scores(h)["compound"] for h in headlines]
         return (np.mean(scores), headlines)
     except Exception:
         return (None, [])
 
-def get_sentiment_all():
-    s_fin, hl_fin = get_sentiment_finviz()
-    s_yahoo, hl_yahoo = get_sentiment_yahoo()
-    valid = [s for s in [s_fin, s_yahoo] if s is not None]
-    if valid:
-        s_agg = np.mean(valid)
-    else:
-        s_agg = None
-    sources = {
-        "Finviz": (s_fin, hl_fin),
-        "Yahoo": (s_yahoo, hl_yahoo),
-    }
-    return s_agg, sources
+def get_sentiment_finnhub_news(api_key, symbol="ES=F"):
+    try:
+        url = f"https://finnhub.io/api/v1/news?category=general&token={api_key}"
+        r = requests.get(url, timeout=8)
+        if r.status_code != 200:
+            return None, []
+        news = r.json()
+        now = datetime.datetime.utcnow()
+        recent_news = [item['headline'] for item in news if 'datetime' in item and datetime.datetime.utcfromtimestamp(item['datetime']) > now - datetime.timedelta(hours=6)]
+        if not recent_news:
+            return (0.0, [])
+        from nltk.sentiment.vader import SentimentIntensityAnalyzer
+        analyzer = SentimentIntensityAnalyzer()
+        scores = [analyzer.polarity_scores(h)["compound"] for h in recent_news]
+        return (np.mean(scores), recent_news)
+    except Exception:
+        return None, []
 
-    st.write(sentiment_score, sentiment_sources)
+def get_sentiment_google_news(query="S&P500"):
+    try:
+        from GoogleNews import GoogleNews
+        gn = GoogleNews(lang='en')
+        gn.search(query)
+        news_list = gn.result()[:20]
+        headlines = [n['title'] for n in news_list]
+        if not headlines:
+            return (0.0, [])
+        from nltk.sentiment.vader import SentimentIntensityAnalyzer
+        analyzer = SentimentIntensityAnalyzer()
+        scores = [analyzer.polarity_scores(h)['compound'] for h in headlines]
+        return np.mean(scores) if scores else 0.0, headlines
+    except Exception:
+        return None, []
+
+def get_sentiment_twitter():
+    try:
+        url = "https://nitter.net/search?f=tweets&q=S%26P500"
+        response = requests.get(url, timeout=6)
+        soup = BeautifulSoup(response.text, 'html.parser')
+        headlines = [h.text for h in soup.find_all('div', {'class':'tweet-content'})][:20]
+        if not headlines:
+            return None, []
+        compound = analyze_sentiment_finbert(headlines)
+        return compound, headlines
+    except Exception as e:
+        return None, []
+
+def get_sentiment_reddit():
+    try:
+        reddit = praw.Reddit(client_id='P9jTf4PCAHmTZdWAQ5yKAg', client_secret='MeSqab6X12LZFW3lmy-r12tG95Gw1w', user_agent='Clean_Pickle7748')
+        headlines = [submission.title for submission in reddit.subreddit('wallstreetbets').hot(limit=20)]
+        if not headlines:
+            return None, []
+        compound = analyze_sentiment_finbert(headlines)
+        return compound, headlines
+    except Exception as e:
+        return None, []
+
+def get_sentiment_trends():
+    try:
+        pytrends = TrendReq()
+        kw_list = ["S&P500", "SP500", "stock market"]
+        pytrends.build_payload(kw_list, timeframe='now 1-H')
+        data = pytrends.interest_over_time()
+        if data.empty:
+            return None, []
+        avg_score = data[kw_list].mean().mean()
+        return avg_score / 100, kw_list
+    except Exception as e:
+        return None, []
+
+def get_sentiment_all_improved(finnhub_api_key=None, google_query="S&P500"):
+    s_twitter, h_twitter = get_sentiment_twitter()
+    s_reddit, h_reddit = get_sentiment_reddit()
+    s_trends, h_trends = get_sentiment_trends()
+    s_finviz, h_finviz = get_sentiment_finviz()
+    s_yahoo, h_yahoo = get_sentiment_yahoo()
+    s_finnhub, h_finnhub = get_sentiment_finnhub_news(finnhub_api_key) if finnhub_api_key else (None, [])
+    s_google, h_google = get_sentiment_google_news(google_query)
+
+    # Aggregation: alle Scores, die nicht None sind
+    scores = [s for s in [s_twitter, s_reddit, s_trends, s_finviz, s_yahoo, s_finnhub, s_google] if s is not None]
+    # Beispielgewichtung: Social = 3, Reddit = 2, Trends = 1, Finviz = 1, Yahoo = 1, Finnhub = 1, Google = 1
+    weights = []
+    for idx, s in enumerate([s_twitter, s_reddit, s_trends, s_finviz, s_yahoo, s_finnhub, s_google]):
+        if s is not None:
+            if idx == 0: weights.append(3)   # Twitter
+            elif idx == 1: weights.append(2) # Reddit
+            else: weights.append(1)
+    final_score = np.average(scores, weights=weights) if scores else 0.0
+    sources = {
+        "Twitter": (s_twitter, h_twitter),
+        "Reddit": (s_reddit, h_reddit),
+        "Google Trends": (s_trends, h_trends),
+        "Finviz": (s_finviz, h_finviz),
+        "Yahoo": (s_yahoo, h_yahoo),
+        "Finnhub News": (s_finnhub, h_finnhub),
+        "Google News": (s_google, h_google)
+    }
+    return final_score, sources
 
 def compute_rsi(series, window=14):
     delta = series.diff()
@@ -500,7 +609,7 @@ if "TICKER" not in st.session_state:
     st.session_state["TICKER"] = "ES=F"
 
 # 2. Sentiment ERST LADEN!
-sentiment_score, sentiment_sources = get_sentiment_all()
+sentiment_score, sentiment_sources = get_sentiment_all_improved()
 
 # ========================== SIDEBAR & UI ==========================
 with st.sidebar:
@@ -621,18 +730,15 @@ _Machine-Learning-basierte Prognose der Kursrichtung für das gewählte Zeitinte
         with st.expander("Kommentare", expanded=False):
             kommentare = st.text_area("Deine Notizen / Kommentare", "", key="kommentare_textarea")
             st.markdown("Hier kannst du beliebige Kommentare, Tradingideen oder Beobachtungen zu diesem Run notieren.")
-        with st.sidebar:
-            with st.expander("Sentiment", expanded=False):
-                if sentiment_sources is not None:
-                    for name, (score, headlines) in sentiment_sources.items():
-                        st.markdown(f"**{name}**: {'{:+.2f}'.format(score) if score is not None else 'n/a'}")
-                        if headlines:
-                            for hl in headlines[:20]:
-                                st.write(f"• {hl}")
-                        else:
-                            st.info("Keine Daten verfügbar.")
-                else:
-                    st.info("Keine Sentiment-Quellen verfügbar.")
+        with st.sidebar.expander("🧠 Verbesserte Sentiment-Analyse"):
+            st.write(f"Aggregiertes Sentiment (FinBERT-basiert): {sentiment_score:+.2f}")
+            for name, (score, headlines) in sentiment_sources.items():
+                st.markdown(f"**{name}**: {'{:+.2f}'.format(score) if score is not None else 'n/a'}")
+            if headlines:
+                for hl in headlines[:20]:
+                    st.write(f"• {hl}")
+            else:
+                st.info("Keine Daten verfügbar.")
 
         df = st.session_state.df if "df" in st.session_state else pd.DataFrame()
         # --- Debug Info ---
@@ -712,7 +818,7 @@ else:
     else:
         st.warning("⚠️ Kein Kurs verfügbar.")
 
-sentiment_score, sentiment_sources = get_sentiment_all()
+sentiment_score, sentiment_sources = get_sentiment_all_improved()
 # st.write("DEBUG Sentiment:", sentiment_score, sentiment_sources)
 now = get_zurich_now()
 if sentiment_score is not None:
@@ -1095,7 +1201,7 @@ for label, delta in interval_options:
         model, preds, mae, hitrate, avg_pred, avg_true, std_pred = train_and_evaluate_regression(
             train, test, feature_cols, target_col="target"
         )
-        model_dict[label] = model
+        model_dict[label] = {"model": model, "selected_features": feature_cols}
 
     # Statistik für das Intervall
     valid = (~df_target["target"].isna()) & (~df_target["ML_Prognose"].isna())
@@ -1123,10 +1229,10 @@ for label, delta in interval_options:
 # --- Reload Prognose (aktuell) für alle Intervalle via Modellvorhersage ---
 realtime_preds = []
 for label, delta in interval_options:
-    model = model_dict.get(label)
-    if model is not None:
-        # Versuche, die für das Modell passenden Features zu bauen
-        selected_features = getattr(model, "selected_features", None)
+    model_entry = model_dict.get(label)
+    if model_entry is not None:
+        model = model_entry["model"]
+        selected_features = model_entry["selected_features"]
         try:
             # Nutze immer die letzten Zeile(n) aus df für die Prognose
             features = build_features(
@@ -1140,6 +1246,8 @@ for label, delta in interval_options:
             realtime_preds.append(pred)
         except Exception as e:
             print(f"Fehler bei Prognose für {label}: {e}")
+            print("Features:", features)
+            print("selected_features:", selected_features)
             realtime_preds.append(None)
     else:
         realtime_preds.append(None)
@@ -1679,3 +1787,30 @@ print(f"🔗 App erreichbar unter:\n{public_url}")
 
 #runtest
 !ps aux | grep streamlit
+
+import joblib
+
+# 1. File laden
+model_data = joblib.load("forecast_model_5min.pkl")
+
+# 2. Aufbau checken
+print("Typ:", type(model_data))
+print("Keys:", model_data.keys())
+
+# 3. Feature-Liste prüfen
+print("Selected features:", model_data.get("selected_features"))
+
+# 4. Modell-Typ prüfen
+print("Model-Typ:", type(model_data.get("model")))
+
+# 5. Beispiel-Prediction (Dummy-Werte, nur zum Test)
+import numpy as np
+import pandas as pd
+features = pd.DataFrame([np.random.randn(len(model_data['selected_features']))], columns=model_data['selected_features'])
+print("Dummy-Prediction:", model_data['model'].predict(features))
+
+# 6. Optional: Importiere ein echtes Datenfile, prüfe, ob du mit realen Daten vorhersagen kannst!
+
+importances = model_data['model'].feature_importances_
+for feat, imp in zip(model_data['selected_features'], importances):
+    print(f"{feat}: {imp:.3f}")
