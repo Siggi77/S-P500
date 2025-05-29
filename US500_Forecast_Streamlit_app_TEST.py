@@ -870,15 +870,19 @@ if price is not None:
 
 
 # ----- Prognose-Berechnung und -Ausgabe -----
+# Hole das Modell für das 15-Minuten-Intervall
+target_label = "15 Min"
+prognose_aktuell = None
+prognose_kurs = "not yet availabe"
+prognose_prozent = "not yet availabe"
 prognose_text = "Seitwärts"
-prognose_kurs = "N/A"
-prognose_prozent = "N/A"
 prognose_color = "gray"
-if price is not None and os.path.exists(MODEL_FILE):
-    data = joblib.load(MODEL_FILE)
-    model = data["model"]
-    selected_features = data["selected_features"]
-    if len(df) > 0:
+
+if price is not None and "model_dict" in locals():
+    model_entry = model_dict.get(target_label)
+    if model_entry is not None and len(df) > 0:
+        model = model_entry["model"]
+        selected_features = model_entry["selected_features"]
         feats_row = df.iloc[-1].to_dict()
         feats = calc_features(feats_row, sentiment_score, selected_features, finnhub_data, volatility_window)
         try:
@@ -895,15 +899,15 @@ if price is not None and os.path.exists(MODEL_FILE):
                 prognose_text = "Seitwärts"
                 prognose_color = "gray"
         except Exception:
-            prognose_kurs = "N/A"
-            prognose_prozent = "N/A"
+            prognose_kurs = "not yet availabe"
+            prognose_prozent = "not yet availabe"
             prognose_text = "?"
             prognose_color = "gray"
-prognose_kurs_display = f"{prognose_kurs:.2f}" if isinstance(prognose_kurs, (int, float)) else "N/A"
-prognose_prozent_display = f"{prognose_prozent:+.2f}%" if isinstance(prognose_prozent, (int, float)) else "N/A"
+prognose_kurs_display = f"{prognose_kurs:.2f}" if isinstance(prognose_kurs, (int, float)) else "not yet availabe"
+prognose_prozent_display = f"{prognose_prozent:+.2f}%" if isinstance(prognose_prozent, (int, float)) else "not yet availabe"
 
 st.markdown(
-    f"<b>Prognose (nächste 5 Minuten):</b> "
+    f"<b>Prognose (nächste 15 Minuten):</b> "
     f"<span style='color:{prognose_color};'>{prognose_text}</span> | "
     f"Kursprognose: {prognose_kurs_display} | "
     f"Änderung: <span style='color:{prognose_color};'>{prognose_prozent_display}</span>",
