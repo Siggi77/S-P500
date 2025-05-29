@@ -1,0 +1,10 @@
+Nun machen wor wohl mal eine saueber Code-Bereinigung. Was ist dabei des beste vorgehen?
+Hier ist der aktuelle Code: 
+
+Prüfe diesen ausführlich und sehr gründlich auf Logik, Kontext, Syntaxt, Reihenfolgen, referenzen, X-referenzen, Funktionen, Ausführungen, udn einfach alles, was dabei Best-Practive ist.
+Stelle eine extrem genaue Analyse dar mit einer ausführlichen Erklärunge, was die app macht, was die Funktionen sind, wie diese funktionnieren udn genererell, ob alles einer best-practive progonose app enstpricht.
+
+Mache ein eingehende Code-Prüfung und debugging, schlage vor, wie der code verbessert werden kann, auchte besonders auf die Riehenfloge im code (redundanzen), schaue, was toter code ist, was nicht mehr gebraucht wird, was doppelt aufgerufen wird, undwosweiter.
+Inspiririre dich an den besten prüfungs- und debugging-Methoden und verschlanke, aber ohne irgend eine funktionalität zu verlieren!
+
+mache vorschläge!
