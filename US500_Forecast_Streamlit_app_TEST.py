@@ -599,6 +599,10 @@ def save_forecast_logs(df, drive_folder):
     drive_path = os.path.join(drive_folder, f"spy_forecast_log_{today_str}.csv")
     local_path = f"spy_forecast_log_{today_str}_local_colab.csv"
 
+    # PATCH: Time als Spalte garantieren!
+    if "Time" not in df.columns and df.index.name == "Time":
+        df = df.reset_index()
+
     df.to_csv(drive_path, index=False)
     df.to_csv(local_path, index=False)
 
@@ -1222,6 +1226,9 @@ if len(df) > 30:
     save_forecast_logs(df, drive_folder)
 
     # Optional: Download-Button immer anzeigen (oder nur wenn genug Daten vorhanden sind)
+    # PATCH: Time als Spalte garantieren!
+    if "Time" not in df.columns and df.index.name == "Time":
+        df = df.reset_index()
     st.download_button("Log als CSV", df.to_csv(index=False), file_name="log.csv", mime="text/csv")
 
 # ==== Statistik- und ML-Tabellen wie gehabt ====
@@ -1909,3 +1916,4 @@ print("Dummy-Prediction:", model_data['model'].predict(features))
 importances = model_data['model'].feature_importances_
 for feat, imp in zip(model_data['selected_features'], importances):
     print(f"{feat}: {imp:.3f}")
+
