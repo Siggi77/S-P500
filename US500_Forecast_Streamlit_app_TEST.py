@@ -39,13 +39,6 @@ NGROK_TOKEN = "2xB84xP48MVVpa7WOjuVT9OgiUI_2pDz4T89jbtkBdgvrLtV4"
 !rm -rf /root/.ngrok2 /root/.config/ngrok
 !streamlit cache clear
 
-from google.colab import drive
-drive.mount('/content/drive')
-
-import os
-drive_folder = '/content/drive/My Drive/PrognoseLogs'
-os.makedirs(drive_folder, exist_ok=True)
-
 # Jeden Tag ein neues Logfile für Forecast-Log
 today_str = datetime.now().strftime("%Y-%m-%d")
 forecast_log_file = f"spy_forecast_log_{today_str}.csv"
@@ -170,13 +163,6 @@ def build_features(
 
 # ========================== KONSTANTEN & INTERVAL OPTIONS ==========================
 from datetime import datetime
-
-from google.colab import drive
-drive.mount('/content/drive')
-
-import os
-drive_folder = '/content/drive/My Drive/PrognoseLogs'
-os.makedirs(drive_folder, exist_ok=True)
 
 today_str = datetime.now().strftime("%Y-%m-%d")
 forecast_log_file = os.path.join(drive_folder, f"spy_forecast_log_{today_str}.csv")
