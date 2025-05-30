@@ -1,0 +1,534 @@
+# ----- Google Drive Mount für Logs -----
+from google.colab import drive
+drive.mount('/content/drive')
+
+import os, shutil, glob, datetime, time, socket, subprocess
+
+# ----------- Konfiguration -----------
+DRIVE_FOLDER = '/content/drive/My Drive/PrognoseLogs'
+os.makedirs(DRIVE_FOLDER, exist_ok=True)
+TODAY_STR = datetime.datetime.now().strftime("%Y-%m-%d")
+FORECAST_LOG_FILE = os.path.join(DRIVE_FOLDER, f"spy_forecast_log_{TODAY_STR}.csv")
+INTRADAY_HISTORY_FILE = os.path.join(DRIVE_FOLDER, "spy_intraday_history.csv")
+LOG_FILES = [FORECAST_LOG_FILE, INTRADAY_HISTORY_FILE]
+MODEL_FILE = os.path.join(DRIVE_FOLDER, "forecast_model_15min.pkl")
+REPAIRED_LOG_FILE = os.path.join(DRIVE_FOLDER, "spy_forecast_log_repaired.csv")
+FINNHUB_API_KEY = "d0ldkdhr01qhb027s8fgd0ldkdhr01qhb027s8g0"
+RESET_LOGS = False
+
+# ----------- Backup & Reset -----------
+for file in LOG_FILES:
+    if os.path.exists(file):
+        if RESET_LOGS:
+            os.remove(file)
+        else:
+            today = datetime.datetime.now().strftime("%Y%m%d")
+            backup_pattern = f"{file.replace('.csv','')}_backup_{today}_*.csv"
+            if not glob.glob(backup_pattern):
+                ts = datetime.datetime.now().strftime("%Y%m%d_%H%M")
+                shutil.copy(file, f"{file.replace('.csv','')}_backup_{ts}.csv")
+
+# ----------- Imports für App -----------
+import streamlit as st
+import pandas as pd
+import numpy as np
+import plotly.graph_objs as go
+import yfinance as yf
+import joblib
+import requests
+from sklearn.ensemble import RandomForestRegressor
+from sklearn.metrics import mean_absolute_error, confusion_matrix, roc_auc_score
+from bs4 import BeautifulSoup
+from streamlit_autorefresh import st_autorefresh
+from nltk.sentiment.vader import SentimentIntensityAnalyzer
+from plotly.subplots import make_subplots
+from transformers import AutoTokenizer, AutoModelForSequenceClassification
+import torch
+import praw
+from pytrends.request import TrendReq
+
+# ----------- Konstanten -----------
+TICKER_LIST = ["ES=F", "US500", "^GSPC", "SPY"]
+INTERVAL_OPTIONS = [
+    ("10 Sek", pd.Timedelta(seconds=10)),
+    ("1 Min", pd.Timedelta(minutes=1)),
+    ("2 Min", pd.Timedelta(minutes=2)),
+    ("5 Min", pd.Timedelta(minutes=5)),
+    ("15 Min", pd.Timedelta(minutes=15)),
+    ("30 Min", pd.Timedelta(minutes=30)),
+    ("1 Std", pd.Timedelta(hours=1)),
+    ("2 Std", pd.Timedelta(hours=2)),
+    ("3 Std", pd.Timedelta(hours=3)),
+    ("5 Std", pd.Timedelta(hours=5)),
+    ("8 Std", pd.Timedelta(hours=8)),
+    ("10 Std", pd.Timedelta(hours=10)),
+    ("Bis Handelsende", None),
+]
+MIN_REQUIRED = 50
+
+# ----------- Feature Engineering -----------
+def compute_rsi(series, window=14):
+    delta = series.diff()
+    gain = delta.clip(lower=0).rolling(window).mean()
+    loss = delta.clip(upper=0).abs().rolling(window).mean()
+    rs = gain / loss
+    return 100 - (100 / (1 + rs))
+
+def compute_ema(series, window=10):
+    return series.ewm(span=window, adjust=False).mean()
+
+def compute_macd(series, fast=12, slow=26, signal=9):
+    fast_ema = series.ewm(span=fast, adjust=False).mean()
+    slow_ema = series.ewm(span=slow, adjust=False).mean()
+    macd = fast_ema - slow_ema
+    signal_line = macd.ewm(span=signal, adjust=False).mean()
+    return macd, signal_line
+
+def compute_bollinger(series, window=20, std=2):
+    mean = series.rolling(window).mean()
+    stddev = series.rolling(window).std()
+    return mean, mean + std * stddev, mean - std * stddev
+
+def add_features(df, rsi_window=14, ema_window=10, macd_fast=12, macd_slow=26, macd_signal=9,
+                 boll_window=20, boll_std=2, volatility_window=10, sentiment=None, finnhub_data=None):
+    df = df.copy()
+    df["RSI"] = compute_rsi(df["Price"], window=rsi_window)
+    df["EMA"] = compute_ema(df["Price"], window=ema_window)
+    df["MACD"], df["MACD_signal"] = compute_macd(df["Price"], fast=macd_fast, slow=macd_slow, signal=macd_signal)
+    _, df["BB_upper"], df["BB_lower"] = compute_bollinger(df["Price"], window=boll_window, std=boll_std)
+    df["Volatility"] = df["Price"].rolling(volatility_window).std()
+    if sentiment is not None:
+        df["Sentiment"] = sentiment
+    if finnhub_data is not None:
+        for key, val in finnhub_data.items():
+            df[f"Finnhub_{key}"] = val
+    return df
+
+# ----------- Zielspalte -----------
+def add_target_return_for_timedelta_with_handelsende(df, delta, price_col="Price", target_col="target", close_time=datetime.time(22, 0)):
+    df = df.copy()
+    df[target_col] = np.nan
+    if df.empty:
+        return df
+    times = pd.to_datetime(df["Time"]) if not isinstance(df.index, pd.DatetimeIndex) else df.index
+    delta = pd.to_timedelta(delta) if delta is not None else None
+    for i in range(len(df)):
+        t0 = times[i]
+        if delta is not None:
+            t1 = t0 + delta
+            if t1.time() > close_time:
+                continue
+            future_idx = np.where(times >= t1)[0]
+            if len(future_idx) > 0:
+                j = future_idx[0]
+                df.iloc[i, df.columns.get_loc(target_col)] = df.iloc[j][price_col] / df.iloc[i][price_col] - 1
+        else:
+            t_tag = t0.date()
+            mask = (times.date == t_tag) & (times.time <= close_time)
+            if mask.any():
+                t_end = times[mask][-1]
+                df.at[t0, target_col] = df.loc[t_end][price_col] / df.loc[t0][price_col] - 1
+    return df
+
+# ----------- Sentiment -----------
+finbert_tokenizer = AutoTokenizer.from_pretrained('yiyanghkust/finbert-tone')
+finbert_model = AutoModelForSequenceClassification.from_pretrained('yiyanghkust/finbert-tone')
+nltk_analyzer = SentimentIntensityAnalyzer()
+
+def analyze_sentiment_finbert(texts):
+    inputs = finbert_tokenizer(texts, return_tensors='pt', padding=True, truncation=True)
+    with torch.no_grad():
+        outputs = finbert_model(**inputs)
+    scores = torch.nn.functional.softmax(outputs.logits, dim=-1)
+    sentiments = scores.numpy()
+    avg_sentiment = sentiments.mean(axis=0)
+    compound = avg_sentiment[0] - avg_sentiment[2]
+    return compound
+
+def get_sentiment_finviz():
+    try:
+        url = f"https://finviz.com/quote.ashx?t=ES=F"
+        headers = {"User-Agent": "Mozilla/5.0"}
+        response = requests.get(url, headers=headers, timeout=8)
+        soup = BeautifulSoup(response.text, "html.parser")
+        news_table = soup.find(id="news-table")
+        headlines = [row.find("a").get_text(strip=True) for row in news_table.find_all("tr") if row.find("a")]
+        if not headlines: return (0.0, [])
+        scores = [nltk_analyzer.polarity_scores(h)["compound"] for h in headlines]
+        return (np.mean(scores), headlines)
+    except Exception:
+        return (None, [])
+
+def get_sentiment_yahoo():
+    try:
+        url = "https://news.search.yahoo.com/search?p=S%26P500"
+        headers = {"User-Agent": "Mozilla/5.0"}
+        resp = requests.get(url, headers=headers, timeout=7)
+        soup = BeautifulSoup(resp.text, "html.parser")
+        headlines = [item.get_text(strip=True) for item in soup.find_all("h4", class_="s-title")]
+        if not headlines: return (0.0, [])
+        scores = [nltk_analyzer.polarity_scores(h)["compound"] for h in headlines]
+        return (np.mean(scores), headlines)
+    except Exception:
+        return (None, [])
+
+def get_sentiment_twitter():
+    try:
+        url = "https://nitter.net/search?f=tweets&q=S%26P500"
+        response = requests.get(url, timeout=6)
+        soup = BeautifulSoup(response.text, 'html.parser')
+        headlines = [h.text for h in soup.find_all('div', {'class':'tweet-content'})][:20]
+        if not headlines: return None, []
+        compound = analyze_sentiment_finbert(headlines)
+        return compound, headlines
+    except Exception:
+        return None, []
+
+def get_sentiment_reddit():
+    try:
+        reddit = praw.Reddit(client_id='P9jTf4PCAHmTZdWAQ5yKAg', client_secret='MeSqab6X12LZFW3lmy-r12tG95Gw1w', user_agent='Clean_Pickle7748')
+        headlines = [submission.title for submission in reddit.subreddit('wallstreetbets').hot(limit=20)]
+        if not headlines: return None, []
+        compound = analyze_sentiment_finbert(headlines)
+        return compound, headlines
+    except Exception:
+        return None, []
+
+def get_sentiment_trends():
+    try:
+        pytrends = TrendReq()
+        kw_list = ["S&P500", "SP500", "stock market"]
+        pytrends.build_payload(kw_list, timeframe='now 1-H')
+        data = pytrends.interest_over_time()
+        if data.empty: return None, []
+        avg_score = data[kw_list].mean().mean()
+        return avg_score / 100, kw_list
+    except Exception:
+        return None, []
+
+def get_sentiment_all(finnhub_api_key=None):
+    s_twitter, h_twitter = get_sentiment_twitter()
+    s_reddit, h_reddit = get_sentiment_reddit()
+    s_trends, h_trends = get_sentiment_trends()
+    s_finviz, h_finviz = get_sentiment_finviz()
+    s_yahoo, h_yahoo = get_sentiment_yahoo()
+    scores = [s for s in [s_twitter, s_reddit, s_trends, s_finviz, s_yahoo] if s is not None]
+    weights = [3 if i==0 else 2 if i==1 else 1 for i, s in enumerate([s_twitter, s_reddit, s_trends, s_finviz, s_yahoo]) if s is not None]
+    final_score = np.average(scores, weights=weights) if scores else 0.0
+    sources = {
+        "Twitter": (s_twitter, h_twitter),
+        "Reddit": (s_reddit, h_reddit),
+        "Google Trends": (s_trends, h_trends),
+        "Finviz": (s_finviz, h_finviz),
+        "Yahoo": (s_yahoo, h_yahoo),
+    }
+    return final_score, sources
+
+# ----------- Logging & Reparatur -----------
+def save_forecast_logs(df, drive_folder):
+    today_str = datetime.datetime.now().strftime("%Y-%m-%d")
+    drive_path = os.path.join(drive_folder, f"spy_forecast_log_{today_str}.csv")
+    local_path = f"spy_forecast_log_{today_str}_local_colab.csv"
+    df.to_csv(drive_path, index=False)
+    df.to_csv(local_path, index=False)
+
+def repair_csv(log_file, repaired_log_file):
+    if not os.path.exists(log_file): return False
+    repaired = False
+    with open(log_file, 'r', encoding='utf-8') as fin:
+        lines = fin.readlines()
+    if len(lines) < 2:
+        with open(repaired_log_file, 'w', encoding='utf-8') as fout:
+            fout.writelines(lines)
+        return False
+    header = lines[0]
+    n_cols = len(header.strip().split(","))
+    good_lines = [header]
+    for line in lines[1:]:
+        if len(line.strip().split(",")) == n_cols:
+            good_lines.append(line)
+        else:
+            repaired = True
+    if repaired:
+        with open(repaired_log_file, 'w', encoding='utf-8') as fout:
+            fout.writelines(good_lines)
+    return repaired
+
+# ----------- ML Utilities -----------
+
+def auto_train_from_all_logs(model_file=MODEL_FILE, min_rows=MIN_REQUIRED, target_col="target", n_steps=15):
+    files = []
+    for pat in ["spy_forecast_log*.csv", "spy_intraday_history*.csv"]:
+        full_pattern = os.path.join(DRIVE_FOLDER, pat)
+        files.extend(glob.glob(full_pattern))
+    dfs = []
+    for file in files:
+        try:
+            df = pd.read_csv(file)
+            dfs.append(df)
+        except Exception:
+            continue
+    if not dfs: return False
+    df_all = pd.concat(dfs, ignore_index=True).drop_duplicates(subset=["Time"])
+    df_all = add_target_return_for_timedelta_with_handelsende(df_all, pd.Timedelta(minutes=n_steps))
+    if target_col not in df_all.columns or df_all[target_col].notna().sum() < min_rows:
+        return False
+    feature_cols = [col for col in df_all.columns if col not in ["Time", "Price", target_col]]
+    X = df_all[feature_cols]
+    y = df_all[target_col]
+    mask = ~y.isna()
+    X = X[mask]
+    y = y[mask]
+    if len(y) < min_rows:
+        return False
+    model = RandomForestRegressor(n_estimators=100, random_state=42)
+    model.fit(X, y)
+    joblib.dump({"model": model, "selected_features": feature_cols}, model_file)
+    return True
+
+def create_dummy_model(model_file=MODEL_FILE):
+    X_dummy = pd.DataFrame({
+        "RSI": np.random.uniform(30, 70, 200),
+        "MACD": np.random.normal(0, 1, 200),
+        "MACD_signal": np.random.normal(0, 1, 200),
+        "BB_range": np.random.uniform(1, 20, 200),
+        "Sentiment": np.random.uniform(-1, 1, 200),
+    })
+    y_dummy = np.random.uniform(-0.02, 0.02, 200)
+    model = RandomForestRegressor(n_estimators=25, random_state=42)
+    model.fit(X_dummy, y_dummy)
+    selected_features = list(X_dummy.columns)
+    joblib.dump({"model": model, "selected_features": selected_features}, model_file)
+
+def train_and_evaluate_regression(train, test, feature_cols, target_col="target"):
+    X_train, y_train = train[feature_cols], train[target_col]
+    X_test, y_test = test[feature_cols], test[target_col]
+    model = RandomForestRegressor(n_estimators=100, random_state=42)
+    model.fit(X_train, y_train)
+    preds = model.predict(X_test)
+    mae = mean_absolute_error(y_test, preds)
+    hitrate = np.mean(np.sign(y_test) == np.sign(preds))
+    avg_pred = np.mean(preds)
+    avg_true = np.mean(y_test)
+    std_pred = np.std(preds)
+    return model, preds, mae, hitrate, avg_pred, avg_true, std_pred
+
+def time_series_train_test_split(df, test_size=0.2):
+    split_idx = int(len(df) * (1 - test_size))
+    train = df.iloc[:split_idx]
+    test = df.iloc[split_idx:]
+    return train, test
+
+# ----------- Preisabfrage -----------
+def get_finnhub_quote(symbol="ES=F", api_key=FINNHUB_API_KEY):
+    url = f"https://finnhub.io/api/v1/quote?symbol={symbol}&token={api_key}"
+    r = requests.get(url, timeout=6)
+    if r.status_code == 200:
+        data = r.json()
+        return {
+            "current": data.get("c"),
+            "high": data.get("h"),
+            "low": data.get("l"),
+            "open": data.get("o"),
+            "prevclose": data.get("pc"),
+            "timestamp": data.get("t")
+        }
+    else:
+        return None
+
+def get_price(ticker):
+    try:
+        yahoo_ticker = ticker.replace('^', '%5E')
+        if ticker == "US500":
+            yahoo_ticker = "US500.cash"
+        url = f"https://finance.yahoo.com/quote/{yahoo_ticker}"
+        r = requests.get(url, headers={"User-Agent": "Mozilla/5.0"}, timeout=5)
+        soup = BeautifulSoup(r.text, "html.parser")
+        s = soup.find("fin-streamer", {"data-field": "regularMarketPrice"})
+        return float(s.text.replace(",", ""))
+    except Exception as e:
+        return None
+
+# ----------- Streamlit App -----------
+def main():
+    st.set_page_config(page_title='US500 Forecast Tool', layout='wide')
+    # --- Sidebar: Reload, Export, Ticker, Indikatoren, Settings, Kommentare, Debug ---
+    with st.sidebar:
+        reload_options = {
+            "5 Sekunden": 5000,
+            "10 Sekunden": 10000,
+            "30 Sekunden": 30000,
+            "1 Minute": 60000,
+            "2 Minuten": 120000
+        }
+        reload_label = st.selectbox("Reload-Intervall", list(reload_options.keys()), index=1)
+        st_autorefresh(interval=reload_options[reload_label], key="autorefresh")
+        csv_export = st.checkbox("Chartdaten als CSV exportieren", value=False)
+        TICKER = st.selectbox("Ticker wählen", TICKER_LIST, index=0)
+        show_sma = st.checkbox("SMA", value=True)
+        sma_window = st.slider("SMA-Fenster", 2, 50, 20)
+        show_ema = st.checkbox("EMA", value=True)
+        ema_window = st.slider("EMA-Fenster", 2, 50, 10)
+        show_rsi = st.checkbox("RSI", value=True)
+        rsi_window = st.slider("RSI-Fenster", 2, 50, 14)
+        show_macd = st.checkbox("MACD", value=True)
+        macd_fast = st.slider("MACD Fast", 2, 50, 12)
+        macd_slow = st.slider("MACD Slow", 2, 100, 26)
+        macd_signal = st.slider("MACD Signal", 2, 50, 9)
+        show_boll = st.checkbox("Bollinger-Bänder", value=True)
+        boll_window = st.slider("Bollinger Fenster", 2, 50, 20)
+        boll_std = st.slider("Bollinger Std-Abw.", 1, 4, 2)
+        show_volatility = st.checkbox("Volatilität", value=True)
+        volatility_window = st.slider("Volatility Fenster", 2, 50, 10)
+        kommentare = st.text_area("Kommentare", "")
+        debug_show = st.checkbox("Debug-Infos anzeigen", value=False)
+
+    # --- Preis & Sentiment laden ---
+    finnhub_data = get_finnhub_quote(TICKER.replace("^", ""), FINNHUB_API_KEY)
+    price = finnhub_data["current"] if finnhub_data and finnhub_data["current"] else get_price(TICKER)
+    sentiment_score, sentiment_sources = get_sentiment_all()
+
+    # --- Daten laden und vorbereiten ---
+    now = pd.Timestamp.now(tz="Europe/Zurich").replace(second=0, microsecond=0)
+    if "df" not in st.session_state:
+        st.session_state["df"] = pd.DataFrame(columns=["Time", "Price"])
+    df = st.session_state.df.copy()
+    if price is not None:
+        new_row = {"Price": price, "Time": now}
+        if df.empty or now > pd.to_datetime(df["Time"]).max():
+            df = pd.concat([df, pd.DataFrame([new_row])], ignore_index=True).drop_duplicates(subset="Time")
+            st.session_state.df = df
+
+    # --- Features berechnen ---
+    df = add_features(df, rsi_window, ema_window, macd_fast, macd_slow, macd_signal,
+                      boll_window, boll_std, volatility_window, sentiment=sentiment_score, finnhub_data=finnhub_data)
+
+    # --- Zielspalte (target) berechnen ---
+    df_target = add_target_return_for_timedelta_with_handelsende(df, pd.Timedelta(minutes=15))
+    valid_targets = df_target["target"].notna().sum()
+    remaining = max(0, MIN_REQUIRED - valid_targets)
+
+    # --- Modelltraining / Dummy bei Bedarf ---
+    if not os.path.exists(MODEL_FILE) or valid_targets >= MIN_REQUIRED:
+        trained = auto_train_from_all_logs()
+        if not trained and not os.path.exists(MODEL_FILE):
+            create_dummy_model()
+
+    # --- Modell laden und Prognose ---
+    data = joblib.load(MODEL_FILE)
+    model = data["model"]
+    selected_features = data["selected_features"]
+    feats_row = df.iloc[-1][selected_features].values
+    try:
+        pred = float(model.predict([feats_row])[0])
+    except Exception:
+        pred = np.nan
+
+    st.markdown(f"# US500/ES=F Live-Prognose")
+    if remaining > 0:
+        st.info(f"Für eine 15-Minuten-Prognose fehlen noch {remaining} Datenpunkte (aktuell: {valid_targets} von {MIN_REQUIRED} benötigt).")
+    else:
+        st.success(f"Prognose: {pred:.4f} ({pred*100:.2f}%)")
+
+    # --- Chart erstellen ---
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(x=df["Time"], y=df["Price"], name="Preis", line=dict(width=2)))
+    if show_sma and "SMA" in df: fig.add_trace(go.Scatter(x=df["Time"], y=df["SMA"], name="SMA", line=dict(width=1)))
+    if show_ema and "EMA" in df: fig.add_trace(go.Scatter(x=df["Time"], y=df["EMA"], name="EMA", line=dict(width=1)))
+    if show_boll and "BB_upper" in df and "BB_lower" in df:
+        fig.add_trace(go.Scatter(x=df["Time"], y=df["BB_upper"], name="BB Upper", line=dict(dash="dot", width=1)))
+        fig.add_trace(go.Scatter(x=df["Time"], y=df["BB_lower"], name="BB Lower", line=dict(dash="dot", width=1)))
+    if show_macd and "MACD" in df: fig.add_trace(go.Scatter(x=df["Time"], y=df["MACD"], name="MACD", yaxis="y2", line=dict(width=1)))
+    if show_rsi and "RSI" in df: fig.add_trace(go.Scatter(x=df["Time"], y=df["RSI"], name="RSI", yaxis="y3", line=dict(width=1)))
+    if show_volatility and "Volatility" in df:
+        fig.add_trace(go.Scatter(x=df["Time"], y=df["Volatility"], name=f"Volatility ({volatility_window})", yaxis="y4", line=dict(width=1)))
+    st.plotly_chart(fig, use_container_width=True)
+
+    # --- Logging ---
+    save_forecast_logs(df, DRIVE_FOLDER)
+
+    # --- Download & Debug ---
+    if csv_export:
+        st.download_button("Log als CSV", df.to_csv(index=False), file_name="log.csv", mime="text/csv")
+    if debug_show:
+        st.write(df.tail(10))
+        st.write("Sentiment Score:", sentiment_score)
+        st.write("Features:", selected_features)
+        st.write("Model:", type(model))
+        st.write("Kommentare:", kommentare)
+
+    # --- Statistiken & Best-Practice-Report ---
+    if st.checkbox("Best-Practice-ML-Report anzeigen", value=True):
+        intervals_for_report = [(label, delta) for (label, delta) in INTERVAL_OPTIONS if delta is not None]
+        best_practice_report(
+            df=df,
+            sentiment=sentiment_score,
+            finnhub_data=finnhub_data,
+            rsi_window=rsi_window,
+            ema_window=ema_window,
+            macd_fast=macd_fast,
+            macd_slow=macd_slow,
+            macd_signal=macd_signal,
+            boll_window=boll_window,
+            boll_std=boll_std,
+            volatility_window=volatility_window,
+            regression_intervals=intervals_for_report,
+            classification=True
+        )
+
+def best_practice_report(
+    df,
+    sentiment=None,
+    finnhub_data=None,
+    rsi_window=14,
+    ema_window=10,
+    macd_fast=12,
+    macd_slow=26,
+    macd_signal=9,
+    boll_window=20,
+    boll_std=2,
+    volatility_window=10,
+    regression_intervals=None,
+    classification=True,
+    class_threshold=0.002
+):
+    if regression_intervals is None:
+        regression_intervals = [(label, delta) for label, delta in INTERVAL_OPTIONS if delta is not None]
+    all_results = []
+    for label, delta in regression_intervals:
+        if delta is None:
+            continue
+        df_feat = add_features(
+            df,
+            rsi_window,
+            ema_window,
+            macd_fast,
+            macd_slow,
+            macd_signal,
+            boll_window,
+            boll_std,
+            volatility_window,
+            sentiment=sentiment,
+            finnhub_data=finnhub_data
+        )
+        df_reg = add_target_return_for_timedelta_with_handelsende(df_feat, delta).dropna(subset=["target"])
+        if len(df_reg) < 50:
+            continue
+        train, test = time_series_train_test_split(df_reg)
+        feature_cols = [c for c in df_reg.columns if c not in ["Time", "Price", "target"]]
+        model, preds, mae, hitrate, avg_pred, avg_true, std_pred = train_and_evaluate_regression(train, test, feature_cols)
+        all_results.append({
+            "Intervall": label,
+            "MAE": mae,
+            "Trefferquote": hitrate,
+            "Prognose Mittelwert": avg_pred,
+            "Real Mittelwert": avg_true,
+            "Prognose Std": std_pred
+        })
+    df_report = pd.DataFrame(all_results)
+    if not df_report.empty:
+        st.write("### [Best Practice] ML-Regression-Report (Zeitfenster-Daten)")
+        st.dataframe(df_report, use_container_width=True)
+
+if __name__ == "__main__":
+    main()
