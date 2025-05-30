@@ -1,3 +1,7 @@
+# Installations BAE
+!pip install streamlit streamlit-autorefresh scikit-learn matplotlib plotly yfinance pandas_datareader snscrape nltk transformers torch praw pytrends --quiet
+!pip install GoogleNews
+
 # ----- Google Drive Mount für Logs -----
 from google.colab import drive
 drive.mount('/content/drive')
